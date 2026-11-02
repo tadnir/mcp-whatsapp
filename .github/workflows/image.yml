@@ -1,0 +1,41 @@
+name: image
+# This fork exists to publish a container image of a reviewed upstream commit
+# for a self-hosted deployment. Pull requests only check that the image
+# builds. Pushes to `terrahome` and v* tags publish ghcr.io/<owner>/mcp-whatsapp,
+# tagged sha-<commit> and the tag.
+on:
+  push:
+    branches: [terrahome]
+    tags: ["v*"]
+  pull_request:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=tag
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' }}
+          build-args: VERSION=${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
