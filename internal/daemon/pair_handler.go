@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sealjay/mcp-whatsapp/internal/client"
 )
@@ -59,10 +60,20 @@ type pairHandlers struct {
 	pairResetLimiter *Limiter
 	pairCodeLimiter  *Limiter
 
-	// CSRF protection for the reset endpoint.
-	csrfMu    sync.Mutex
-	csrfToken string
+	// CSRF protection for the POST endpoints: every rendered /pair page
+	// gets its own single-use token, valid for csrfTokenTTL. Keeping more
+	// than one means a second tab, or the page reloading itself, does not
+	// invalidate the form a person is filling in.
+	csrfMu     sync.Mutex
+	csrfTokens map[string]time.Time // token -> issued at
 }
+
+const (
+	// csrfTokenTTL is how long a /pair page's form stays submittable.
+	csrfTokenTTL = 15 * time.Minute
+	// csrfMaxTokens caps the outstanding tokens; the oldest go first.
+	csrfMaxTokens = 64
+)
 
 // newPairHandlers constructs handlers with default rate limiters.
 func newPairHandlers(cache *PairCache, reset resetter, coder pairCoder) *pairHandlers {
@@ -72,12 +83,15 @@ func newPairHandlers(cache *PairCache, reset resetter, coder pairCoder) *pairHan
 		coder: coder,
 		// pair.html.tmpl auto-refreshes the whole page (and its embedded QR
 		// image) every 5s while unpaired, so both limiters below must refill
-		// faster than that or a single viewer permanently rate-limits itself
-		// once the burst is spent.
-		pairGetLimiter:   NewLimiter(15.0/60.0, 5),  // 15/min, burst 5
-		pairQRLimiter:    NewLimiter(15.0/60.0, 10), // 15/min, burst 10
+		// faster than that, with room for a few open tabs (each reloads on
+		// its own), or viewers permanently rate-limit themselves once the
+		// burst is spent. The limiters are shared by every client.
+		pairGetLimiter:   NewLimiter(60.0/60.0, 20), // 60/min, burst 20
+		pairQRLimiter:    NewLimiter(60.0/60.0, 20), // 60/min, burst 20
 		pairResetLimiter: NewLimiter(1.0/60.0, 1),   // 1/min, burst 1
-		pairCodeLimiter:  NewLimiter(3.0/60.0, 1),   // 3/min, burst 1; WhatsApp limits code requests server-side too
+		// 3/min, burst 2; WhatsApp limits code requests server-side too.
+		// Only requests that pass the CSRF and phone checks are charged.
+		pairCodeLimiter: NewLimiter(3.0/60.0, 2),
 	}
 }
 
@@ -90,25 +104,51 @@ func (h *pairHandlers) generateCSRFToken() string {
 		panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
 	}
 	token := hex.EncodeToString(b)
+	now := time.Now()
 	h.csrfMu.Lock()
-	h.csrfToken = token
-	h.csrfMu.Unlock()
+	defer h.csrfMu.Unlock()
+	if h.csrfTokens == nil {
+		h.csrfTokens = make(map[string]time.Time)
+	}
+	h.pruneCSRFTokensLocked(now)
+	for len(h.csrfTokens) >= csrfMaxTokens {
+		var oldest string
+		var oldestAt time.Time
+		for t, at := range h.csrfTokens {
+			if oldest == "" || at.Before(oldestAt) {
+				oldest, oldestAt = t, at
+			}
+		}
+		delete(h.csrfTokens, oldest)
+	}
+	h.csrfTokens[token] = now
 	return token
 }
 
-// validCSRFToken checks whether the supplied token matches the stored one.
-// A match consumes the token (single-use). Thread-safe.
+// pruneCSRFTokensLocked drops expired tokens. Callers hold csrfMu.
+func (h *pairHandlers) pruneCSRFTokensLocked(now time.Time) {
+	for t, at := range h.csrfTokens {
+		if now.Sub(at) > csrfTokenTTL {
+			delete(h.csrfTokens, t)
+		}
+	}
+}
+
+// validCSRFToken checks whether the supplied token is one this server
+// issued and has not expired. A match consumes the token (single-use).
+// Thread-safe.
 func (h *pairHandlers) validCSRFToken(token string) bool {
 	h.csrfMu.Lock()
 	defer h.csrfMu.Unlock()
-	if h.csrfToken == "" || token == "" {
+	if token == "" || h.csrfTokens == nil {
 		return false
 	}
-	ok := h.csrfToken == token
-	if ok {
-		h.csrfToken = "" // single-use: consume after validation
+	h.pruneCSRFTokensLocked(time.Now())
+	if _, ok := h.csrfTokens[token]; !ok {
+		return false
 	}
-	return ok
+	delete(h.csrfTokens, token) // single-use: consume after validation
+	return true
 }
 
 func (h *pairHandlers) mount(mux *http.ServeMux) {
@@ -121,7 +161,10 @@ func (h *pairHandlers) mount(mux *http.ServeMux) {
 func (h *pairHandlers) handlePairPage(w http.ResponseWriter, r *http.Request) {
 	if !h.pairGetLimiter.Allow() {
 		w.Header().Set("Retry-After", "4")
-		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		// Browsers follow Refresh on any response, so an open page
+		// recovers by itself instead of stopping at this error.
+		w.Header().Set("Refresh", "4")
+		http.Error(w, "rate limit exceeded, retrying in a few seconds", http.StatusTooManyRequests)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -214,11 +257,6 @@ func (h *pairHandlers) handlePairCode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	if !h.pairCodeLimiter.Allow() {
-		w.Header().Set("Retry-After", "20")
-		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
-		return
-	}
 	if h.cache.Paired() {
 		http.Redirect(w, r, "/pair", http.StatusSeeOther)
 		return
@@ -234,6 +272,15 @@ func (h *pairHandlers) handlePairCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	phone := normalizePairingPhone(r.FormValue("phone"))
+	// Charged only now, so a stale form or a mistyped number does not
+	// spend the few code requests a minute WhatsApp itself allows.
+	if phone != "" && !h.pairCodeLimiter.Allow() {
+		w.Header().Set("Retry-After", "20")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = pairCodeTmpl.Execute(w, pairCodePageData{Message: "Too many pairing-code requests. Wait 20 seconds, then go back and try again."})
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	data := pairCodePageData{Phone: phone}
 	if phone == "" {
