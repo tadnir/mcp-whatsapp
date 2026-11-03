@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sealjay/mcp-whatsapp/internal/client"
 )
@@ -194,19 +195,19 @@ func TestHandlePairReset_LogoutErrorSurfaces(t *testing.T) {
 
 func TestPairGet_RateLimited(t *testing.T) {
 	h, _ := newTestHandlers(false, "abc", nil)
-	// Exhaust the burst of 5.
-	for i := 0; i < 5; i++ {
+	// Exhaust the burst of 20.
+	for i := 0; i < 20; i++ {
 		w := httptest.NewRecorder()
 		h.handlePairPage(w, httptest.NewRequest(http.MethodGet, "/pair", nil))
 		if w.Code != http.StatusOK {
 			t.Fatalf("request %d: want 200, got %d", i, w.Code)
 		}
 	}
-	// 6th should be rate-limited.
+	// 21st should be rate-limited.
 	w := httptest.NewRecorder()
 	h.handlePairPage(w, httptest.NewRequest(http.MethodGet, "/pair", nil))
 	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("6th request: want 429, got %d", w.Code)
+		t.Fatalf("21st request: want 429, got %d", w.Code)
 	}
 	if ra := w.Header().Get("Retry-After"); ra == "" {
 		t.Fatal("expected Retry-After header on 429")
@@ -278,7 +279,7 @@ func (f *fakePairCoder) PairPhone(_ context.Context, _ string) (string, error) {
 func TestHandlePairCode_Success(t *testing.T) {
 	cache := NewPairCache()
 	h := newPairHandlers(cache, &fakeResetter{}, &fakePairCoder{code: "ABCD1234"})
-	h.csrfToken = "tok"
+	h.csrfTokens = map[string]time.Time{"tok": time.Now()}
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("csrf_token=tok&phone=+919876543210"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -293,15 +294,61 @@ func TestHandlePairCode_Success(t *testing.T) {
 
 func TestHandlePairCode_RateLimited(t *testing.T) {
 	cache := NewPairCache()
-	h := newPairHandlers(cache, &fakeResetter{}, &fakePairCoder{})
-	// Burst is 1; the first request consumes it (it fails CSRF first, but the
-	// limiter has already allowed and spent its token), so the next is 429.
+	h := newPairHandlers(cache, &fakeResetter{}, &fakePairCoder{code: "ABCD1234"})
+	post := func() int {
+		tok := h.generateCSRFToken()
+		req := httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("csrf_token="+tok+"&phone=919876543210"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		h.handlePairCode(w, req)
+		return w.Code
+	}
+	// Burst is 2: two valid requests pass, the third is 429.
+	for i := 0; i < 2; i++ {
+		if code := post(); code != http.StatusOK {
+			t.Fatalf("request %d: want 200, got %d", i, code)
+		}
+	}
+	if code := post(); code != http.StatusTooManyRequests {
+		t.Fatalf("third request: want 429, got %d", code)
+	}
+}
+
+func TestHandlePairCode_FailedChecksDoNotSpendLimit(t *testing.T) {
+	cache := NewPairCache()
+	h := newPairHandlers(cache, &fakeResetter{}, &fakePairCoder{code: "ABCD1234"})
+	// Stale forms (no or unknown CSRF token) and invalid numbers are
+	// rejected without charging the limiter.
+	for i := 0; i < 5; i++ {
+		w := httptest.NewRecorder()
+		h.handlePairCode(w, httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("phone=919876543210")))
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("missing CSRF %d: want 403, got %d", i, w.Code)
+		}
+	}
+	tok := h.generateCSRFToken()
+	req := httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("csrf_token="+tok+"&phone=919876543210"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
-	h.handlePairCode(w, httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("phone=919876543210")))
-	w = httptest.NewRecorder()
-	h.handlePairCode(w, httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("phone=919876543210")))
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("status: want 429, got %d", w.Code)
+	h.handlePairCode(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("valid request after rejected ones: want 200, got %d", w.Code)
+	}
+}
+
+func TestCSRFTokens_SeveralPagesStayValid(t *testing.T) {
+	cache := NewPairCache()
+	h := newPairHandlers(cache, &fakeResetter{}, &fakePairCoder{})
+	first := h.generateCSRFToken()
+	second := h.generateCSRFToken() // a reload or a second tab
+	if !h.validCSRFToken(first) {
+		t.Fatal("an earlier page's token should still be valid")
+	}
+	if h.validCSRFToken(first) {
+		t.Fatal("a token should be single-use")
+	}
+	if !h.validCSRFToken(second) {
+		t.Fatal("the later page's token should be valid too")
 	}
 }
 
@@ -318,7 +365,7 @@ func TestHandlePairCode_NoCoder(t *testing.T) {
 func TestHandlePairCode_InvalidPhone(t *testing.T) {
 	cache := NewPairCache()
 	h := newPairHandlers(cache, &fakeResetter{}, &fakePairCoder{})
-	h.csrfToken = "tok"
+	h.csrfTokens = map[string]time.Time{"tok": time.Now()}
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/pair/code", strings.NewReader("csrf_token=tok&phone=0123456"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
