@@ -13,6 +13,12 @@ import (
 	"github.com/sealjay/mcp-whatsapp/internal/client"
 )
 
+// testChatJID and testMessageID name the message every test downloads.
+const (
+	testChatJID   = "972500000000@s.whatsapp.net"
+	testMessageID = "3EB0ABCDEF"
+)
+
 // jpegMagic is the minimum prefix (SOI + APP0 marker) that
 // http.DetectContentType recognises as image/jpeg.
 var jpegMagic = []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00}
@@ -74,7 +80,7 @@ func TestDownloadMediaResult_ImageInlined(t *testing.T) {
 		Path:      path,
 	}
 
-	res, err := downloadMediaResult(r)
+	res, err := downloadMediaResult(r, testChatJID, testMessageID, true)
 	if err != nil {
 		t.Fatalf("downloadMediaResult: %v", err)
 	}
@@ -111,7 +117,7 @@ func TestDownloadMediaResult_AudioInlined(t *testing.T) {
 		Path:      path,
 	}
 
-	res, err := downloadMediaResult(r)
+	res, err := downloadMediaResult(r, testChatJID, testMessageID, true)
 	if err != nil {
 		t.Fatalf("downloadMediaResult: %v", err)
 	}
@@ -127,11 +133,39 @@ func TestDownloadMediaResult_AudioInlined(t *testing.T) {
 	}
 }
 
-// TestDownloadMediaResult_DocumentPathOnly: documents aren't renderable
-// inline, so the result carries only the JSON summary. The caller still
-// gets Path and can fetch the file out of band.
-func TestDownloadMediaResult_DocumentPathOnly(t *testing.T) {
-	path := writeFile(t, "spec.pdf", []byte("%PDF-1.4"))
+// embeddedBlob returns the blob of the EmbeddedResource in content[1].
+func embeddedBlob(t *testing.T, res *mcp.CallToolResult) mcp.BlobResourceContents {
+	t.Helper()
+	if len(res.Content) != 2 {
+		t.Fatalf("expected 2 content blocks, got %d", len(res.Content))
+	}
+	emb, ok := res.Content[1].(mcp.EmbeddedResource)
+	if !ok {
+		t.Fatalf("content[1] should be EmbeddedResource, got %T", res.Content[1])
+	}
+	blob, ok := emb.Resource.(mcp.BlobResourceContents)
+	if !ok {
+		t.Fatalf("embedded resource should be a blob, got %T", emb.Resource)
+	}
+	return blob
+}
+
+// summaryOf parses the JSON summary into the full downloadMediaSummary.
+func summaryOf(t *testing.T, res *mcp.CallToolResult) downloadMediaSummary {
+	t.Helper()
+	var got downloadMediaSummary
+	if err := json.Unmarshal([]byte(firstText(t, res)), &got); err != nil {
+		t.Fatalf("summary is not JSON: %v", err)
+	}
+	return got
+}
+
+// TestDownloadMediaResult_DocumentEmbedded: a document under the cap comes
+// back as an EmbeddedResource blob with its sniffed MIME type and its
+// whatsapp://media URI, so tool-only remote clients get the file.
+func TestDownloadMediaResult_DocumentEmbedded(t *testing.T) {
+	pdf := []byte("%PDF-1.4\n%test")
+	path := writeFile(t, "spec.pdf", pdf)
 	r := client.DownloadResult{
 		Success:   true,
 		Message:   "Successfully downloaded document media",
@@ -140,20 +174,32 @@ func TestDownloadMediaResult_DocumentPathOnly(t *testing.T) {
 		Path:      path,
 	}
 
-	res, err := downloadMediaResult(r)
+	res, err := downloadMediaResult(r, testChatJID, testMessageID, true)
 	if err != nil {
 		t.Fatalf("downloadMediaResult: %v", err)
 	}
-	if len(res.Content) != 1 {
-		t.Fatalf("expected 1 content block (document is not inlined), got %d", len(res.Content))
-	}
 	assertJSONSummary(t, res, r)
+	blob := embeddedBlob(t, res)
+	if blob.MIMEType != "application/pdf" {
+		t.Errorf("MIMEType = %q, want application/pdf", blob.MIMEType)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(blob.Blob)
+	if err != nil || string(decoded) != string(pdf) {
+		t.Errorf("blob does not decode to the file (err %v)", err)
+	}
+	chat, msg, err := parseMediaURI(blob.URI)
+	if err != nil || chat != testChatJID || msg != testMessageID {
+		t.Errorf("URI %q parses to (%q, %q, %v)", blob.URI, chat, msg, err)
+	}
+	sum := summaryOf(t, res)
+	if !sum.Embedded || sum.ResourceURI != blob.URI || sum.Size != int64(len(pdf)) || sum.MIMEType != "application/pdf" {
+		t.Errorf("summary = %+v", sum)
+	}
 }
 
-// TestDownloadMediaResult_VideoPathOnly: same as document — not embedded,
-// caller must fetch via Path.
-func TestDownloadMediaResult_VideoPathOnly(t *testing.T) {
-	path := writeFile(t, "clip.mp4", []byte{0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p'})
+// TestDownloadMediaResult_VideoEmbedded: same as document.
+func TestDownloadMediaResult_VideoEmbedded(t *testing.T) {
+	path := writeFile(t, "clip.mp4", []byte{0x00, 0x00, 0x00, 0x0C, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'})
 	r := client.DownloadResult{
 		Success:   true,
 		Message:   "Successfully downloaded video media",
@@ -162,12 +208,91 @@ func TestDownloadMediaResult_VideoPathOnly(t *testing.T) {
 		Path:      path,
 	}
 
-	res, err := downloadMediaResult(r)
+	res, err := downloadMediaResult(r, testChatJID, testMessageID, true)
 	if err != nil {
 		t.Fatalf("downloadMediaResult: %v", err)
 	}
-	if len(res.Content) != 1 {
-		t.Fatalf("expected 1 content block for video, got %d", len(res.Content))
+	if blob := embeddedBlob(t, res); blob.MIMEType != "video/mp4" {
+		t.Errorf("MIMEType = %q, want video/mp4", blob.MIMEType)
+	}
+}
+
+// TestDownloadMediaResult_MIMEFromExtension: when sniffing finds only
+// octet-stream, the filename's extension names the type.
+func TestDownloadMediaResult_MIMEFromExtension(t *testing.T) {
+	path := writeFile(t, "notes.json", []byte{0x00, 0x01, 0x02})
+	r := client.DownloadResult{
+		Success:   true,
+		Message:   "Successfully downloaded document media",
+		MediaType: "document",
+		Filename:  "notes.json",
+		Path:      path,
+	}
+
+	res, err := downloadMediaResult(r, testChatJID, testMessageID, true)
+	if err != nil {
+		t.Fatalf("downloadMediaResult: %v", err)
+	}
+	if blob := embeddedBlob(t, res); !strings.HasPrefix(blob.MIMEType, "application/json") {
+		t.Errorf("MIMEType = %q, want application/json", blob.MIMEType)
+	}
+}
+
+// TestDownloadMediaResult_OversizedDocumentLinked: a document over the
+// resource cap is not embedded; a ResourceLink points at resources/read.
+func TestDownloadMediaResult_OversizedDocumentLinked(t *testing.T) {
+	big := make([]byte, inlineResourceMaxBytes+1)
+	copy(big, "%PDF-1.4")
+	path := writeFile(t, "big.pdf", big)
+	r := client.DownloadResult{
+		Success:   true,
+		Message:   "Successfully downloaded document media",
+		MediaType: "document",
+		Filename:  "big.pdf",
+		Path:      path,
+	}
+
+	res, err := downloadMediaResult(r, testChatJID, testMessageID, true)
+	if err != nil {
+		t.Fatalf("downloadMediaResult: %v", err)
+	}
+	assertLinked(t, res, "big.pdf")
+	if sum := summaryOf(t, res); sum.Embedded || sum.Size != int64(len(big)) {
+		t.Errorf("summary = %+v", sum)
+	}
+}
+
+// TestDownloadMediaResult_IncludeContentFalse: with include_content false,
+// even a small image comes back as a link only.
+func TestDownloadMediaResult_IncludeContentFalse(t *testing.T) {
+	path := writeFile(t, "img.jpg", jpegMagic)
+	r := client.DownloadResult{
+		Success:   true,
+		Message:   "Successfully downloaded image media",
+		MediaType: "image",
+		Filename:  "img.jpg",
+		Path:      path,
+	}
+
+	res, err := downloadMediaResult(r, testChatJID, testMessageID, false)
+	if err != nil {
+		t.Fatalf("downloadMediaResult: %v", err)
+	}
+	assertLinked(t, res, "img.jpg")
+}
+
+// assertLinked checks content[1] is a ResourceLink to the test message.
+func assertLinked(t *testing.T, res *mcp.CallToolResult, name string) {
+	t.Helper()
+	if len(res.Content) != 2 {
+		t.Fatalf("expected 2 content blocks, got %d", len(res.Content))
+	}
+	link, ok := res.Content[1].(mcp.ResourceLink)
+	if !ok {
+		t.Fatalf("content[1] should be ResourceLink, got %T", res.Content[1])
+	}
+	if link.URI != mediaResourceURI(testChatJID, testMessageID) || link.Name != name {
+		t.Errorf("link = %+v", link)
 	}
 }
 
@@ -180,7 +305,7 @@ func TestDownloadMediaResult_FailurePathOnly(t *testing.T) {
 		Message: "failed to download media: download failed with status code 403",
 	}
 
-	res, err := downloadMediaResult(r)
+	res, err := downloadMediaResult(r, testChatJID, testMessageID, true)
 	if err != nil {
 		t.Fatalf("downloadMediaResult: %v", err)
 	}
@@ -202,7 +327,7 @@ func TestDownloadMediaResult_MissingFileFallsBack(t *testing.T) {
 		Path:      filepath.Join(t.TempDir(), "does-not-exist.jpg"),
 	}
 
-	res, err := downloadMediaResult(r)
+	res, err := downloadMediaResult(r, testChatJID, testMessageID, true)
 	if err != nil {
 		t.Fatalf("downloadMediaResult: %v", err)
 	}
@@ -211,8 +336,8 @@ func TestDownloadMediaResult_MissingFileFallsBack(t *testing.T) {
 	}
 }
 
-// TestDownloadMediaResult_OversizedNotInlined: files above the inline cap
-// stay reachable via Path but are NOT embedded. This protects the
+// TestDownloadMediaResult_OversizedNotInlined: images above the inline cap
+// are NOT embedded; a ResourceLink points at resources/read instead. This protects the
 // transport frame and the LLM context from multi-megabyte payloads.
 func TestDownloadMediaResult_OversizedNotInlined(t *testing.T) {
 	// One byte over the cap. Prefix with jpegMagic so http.DetectContentType
@@ -230,11 +355,9 @@ func TestDownloadMediaResult_OversizedNotInlined(t *testing.T) {
 		Path:      path,
 	}
 
-	res, err := downloadMediaResult(r)
+	res, err := downloadMediaResult(r, testChatJID, testMessageID, true)
 	if err != nil {
 		t.Fatalf("downloadMediaResult: %v", err)
 	}
-	if len(res.Content) != 1 {
-		t.Fatalf("expected 1 content block for oversized file, got %d", len(res.Content))
-	}
+	assertLinked(t, res, "huge.jpg")
 }
