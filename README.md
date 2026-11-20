@@ -79,7 +79,9 @@ Restart the client. The daemon outlives client restarts.
 
 Paths outside the root, including symlinks that resolve outside it, are rejected. Anything inside the root is readable and writable by the tools, so keep secrets out.
 
-**Sandboxed clients (Claude Cowork and similar)** cannot read the daemon's cache. Point `WHATSAPP_MCP_MEDIA_ROOT` at a directory the sandbox can read and give the client this instruction:
+**Remote clients** get the file in the `download_media` result itself: images and audio up to 5 MiB as image or audio content, videos and documents up to 10 MiB as an embedded resource (base64 blob), and larger files as a resource link to `whatsapp://media/{chat_jid}/{message_id}`, which `resources/read` serves at any size. Pass `include_content: false` for the summary and link only.
+
+**Sandboxed clients (Claude Cowork and similar)** that share a directory with the daemon can have the file written there instead, since they cannot read the daemon's cache. Point `WHATSAPP_MCP_MEDIA_ROOT` at a directory the sandbox can read and give the client this instruction:
 
 > When calling the WhatsApp MCP's `download_media`, always pass `output_path` set to a path under your shared workspace. Without it the decrypted file lands only in the daemon's local cache, which is outside your sandbox and unreadable. `output_path` must live under `WHATSAPP_MCP_MEDIA_ROOT` on the daemon side; the basename is yours to pick.
 
@@ -141,7 +143,7 @@ Data lives under `./store/` (`-store DIR`): `messages.db` (message cache), `what
 | `list_chats` | List chats with last-message preview; sort by activity or name |
 | `get_chat` | Chat metadata by JID |
 | `get_message_context` | Before/after window around a specific message |
-| `download_media` | Download persisted media to a local path |
+| `download_media` | Download a message's media; returns the file (embedded, or as a resource link when large) and its cache path |
 | `request_sync` | Ask WhatsApp to backfill history for a chat |
 
 ### Send
