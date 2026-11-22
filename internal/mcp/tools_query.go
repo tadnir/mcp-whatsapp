@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"time"
+	_ "time/tzdata" // time zones for list_chat_activity in images without /usr/share/zoneinfo
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -10,12 +12,13 @@ import (
 )
 
 // registerQueryTools wires read-only query tools: list_chats, get_chat,
-// list_messages, get_message_context, search_contacts, get_status,
-// is_on_whatsapp.
+// list_messages, list_chat_activity, get_message_context, search_contacts,
+// get_status, is_on_whatsapp.
 func (s *Server) registerQueryTools() {
 	s.registerSearchContacts()
 	s.registerListMessages()
 	s.registerListChats()
+	s.registerListChatActivity()
 	s.registerGetChat()
 	s.registerGetMessageContext()
 	s.registerIsOnWhatsApp()
@@ -160,6 +163,52 @@ func (s *Server) registerListChats() {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		return resultJSON(chats)
+	}))
+}
+
+// -- list_chat_activity -----------------------------------------------------
+
+type listChatActivityArgs struct {
+	After    string `json:"after"`
+	Before   string `json:"before,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
+}
+
+func (s *Server) registerListChatActivity() {
+	tool := mcp.NewTool("list_chat_activity",
+		mcp.WithDescription(offlineSafePrefix+"Count cached messages sent and received per day in every direct (1:1) chat, for contact-tracking apps that log when you last talked with someone. Read-only; no side effects; message content is never returned, and groups, broadcast lists and status updates are left out. Use list_messages for the messages themselves. Returns a JSON array of {chat_jid, phone_number, name, days: [{date, sent, received, first_at, last_at}]}; a person's LID chat is merged into their phone-number chat."),
+		mcp.WithString("after", mcp.Required(), mcp.Description("ISO-8601 lower bound on message timestamp (exclusive), such as `2026-01-01T00:00:00Z`")),
+		mcp.WithString("before", mcp.Description("ISO-8601 upper bound on message timestamp (inclusive); defaults to now")),
+		mcp.WithString("timezone", mcp.DefaultString("UTC"), mcp.Description("IANA time zone that decides where each day starts, such as `Asia/Jerusalem` (defaults to UTC)")),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
+	)
+	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a listChatActivityArgs) (*mcp.CallToolResult, error) {
+		if r := requireNonEmpty("after", a.After); r != nil {
+			return r, nil
+		}
+		var p store.ChatActivityParams
+		var err error
+		if p.After, err = parseTimestamp(a.After); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid 'after': %v", err)), nil
+		}
+		if a.Before != "" {
+			if p.Before, err = parseTimestamp(a.Before); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid 'before': %v", err)), nil
+			}
+		}
+		if a.Timezone != "" {
+			if p.Loc, err = time.LoadLocation(a.Timezone); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid 'timezone': %v", err)), nil
+			}
+		}
+		activity, err := s.client.Store().ListChatActivity(ctx, p)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return resultJSON(activity)
 	}))
 }
 
