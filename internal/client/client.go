@@ -48,6 +48,7 @@ type Client struct {
 	allowedMediaRoot string
 	redactor         *security.Redactor
 	limiter          *ratelimit.Limiter
+	groups           *groupInfoCache
 }
 
 // New constructs a Client. It sets the latest WhatsApp version best-effort,
@@ -131,6 +132,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		allowedMediaRoot: cfg.AllowedMediaRoot,
 		redactor:         redactor,
 		limiter:          limiter,
+		groups:           newGroupInfoCache(groupInfoTTL),
 	}, nil
 }
 

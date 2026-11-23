@@ -55,6 +55,18 @@ Scan the QR with WhatsApp (*Settings → Linked Devices → Link a Device*). The
 - **No QR scan:** use the phone-number form on `/pair` (or `login -phone +<international number>`), then type the code into *Link a Device → Link with phone number instead*.
 - The `/pair/*` endpoints are CSRF-protected and rate-limited (15 GET/min, 1 reset/min, 3 code requests/min).
 
+### Rate limits
+
+The daemon limits everything that reaches WhatsApp's servers, so a client in a loop can't make the account look like a bot. Answers from the local cache never count.
+
+- Sends: at least 45 seconds apart and 30 an hour, or 90 seconds apart and 15 an hour to people who never wrote to you.
+- `is_on_whatsapp`: 3 lookups a minute.
+- `request_sync`: 5 an hour, and one every 2 minutes per chat.
+- Live lookups (`get_group_info`, `list_groups`, `get_blocklist`): 10 a minute and 60 an hour. Group details are kept for 10 minutes, and group changes clear them.
+- `download_media`: 60 downloads an hour. Files already downloaded don't count.
+
+The `X-Rate-Limit-Override` request header turns the limits off for one request.
+
 ### Connect your MCP client
 
 `serve` listens on `127.0.0.1:8765` (or `$WHATSAPP_MCP_ADDR`) and serves MCP at `/mcp`. It is stateless (no `Mcp-Session-Id`) and speaks MCP 2026-07-28 as well as older revisions.

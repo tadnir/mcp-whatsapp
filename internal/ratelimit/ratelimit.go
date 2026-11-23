@@ -38,6 +38,23 @@ type Config struct {
 	// minute. The original 17-way parallel fanout died on a usync 429, not a
 	// send 429 — usync has its own, tighter server-side budget.
 	MaxUsyncPerMinute int
+
+	// MaxHistorySyncsPerHour caps on-demand history-sync requests (the
+	// request_sync tool). Each one is a peer message to the phone that makes
+	// it upload old messages, so a loop of them is unusual traffic.
+	MaxHistorySyncsPerHour int
+	// HistorySyncChatInterval is the floor between two history-sync requests
+	// for the same chat: the phone answers asynchronously, and asking again
+	// before it has answered only repeats the request.
+	HistorySyncChatInterval time.Duration
+	// MaxLookupsPerMinute and MaxLookupsPerHour cap live lookups that go to
+	// WhatsApp's servers instead of the local cache: group info, the list of
+	// joined groups and the blocklist. Cached answers do not count.
+	MaxLookupsPerMinute int
+	MaxLookupsPerHour   int
+	// MaxDownloadsPerHour caps media downloads from WhatsApp's CDN. Media
+	// already in the local cache does not count.
+	MaxDownloadsPerHour int
 }
 
 // DefaultConfig returns the limits derived from the incident that motivated
@@ -50,6 +67,12 @@ func DefaultConfig() Config {
 		NonContactMinInterval: 90 * time.Second,
 		NonContactMaxPerHour:  15,
 		MaxUsyncPerMinute:     3,
+
+		MaxHistorySyncsPerHour:  5,
+		HistorySyncChatInterval: 2 * time.Minute,
+		MaxLookupsPerMinute:     10,
+		MaxLookupsPerHour:       60,
+		MaxDownloadsPerHour:     60,
 	}
 }
 
@@ -73,6 +96,11 @@ type Limiter struct {
 	nonContactSends []time.Time // non-contact sends within the trailing hour
 	usyncs          []time.Time // usync lookups within the trailing minute
 	lastSend        time.Time   // zero when no send has been recorded yet
+
+	historySyncs []time.Time          // history-sync requests within the trailing hour
+	lastChatSync map[string]time.Time // last history-sync request per chat
+	lookups      []time.Time          // live lookups within the trailing hour
+	downloads    []time.Time          // media downloads within the trailing hour
 }
 
 // New returns a Limiter using the wall clock.
@@ -134,6 +162,82 @@ func (l *Limiter) AllowUsync() Decision {
 		return Decision{Allowed: false, RetryAfter: untilOldestExpires(l.usyncs, now, time.Minute), Reason: "usync burst guard (is_on_whatsapp) reached"}
 	}
 	l.usyncs = append(l.usyncs, now)
+	return Decision{Allowed: true}
+}
+
+// AllowHistorySync atomically checks whether an on-demand history-sync
+// request for chat is permitted and, if so, records it. A denied decision
+// does not consume budget.
+func (l *Limiter) AllowHistorySync(chat string) Decision {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.clock()
+
+	if last, ok := l.lastChatSync[chat]; ok && l.cfg.HistorySyncChatInterval > 0 {
+		if elapsed := now.Sub(last); elapsed < l.cfg.HistorySyncChatInterval {
+			return Decision{Allowed: false, RetryAfter: l.cfg.HistorySyncChatInterval - elapsed, Reason: "a history sync for this chat was just requested"}
+		}
+	}
+	l.historySyncs = pruneBefore(l.historySyncs, now.Add(-time.Hour))
+	if l.cfg.MaxHistorySyncsPerHour > 0 && len(l.historySyncs) >= l.cfg.MaxHistorySyncsPerHour {
+		return Decision{Allowed: false, RetryAfter: untilOldestExpires(l.historySyncs, now, time.Hour), Reason: "hourly history-sync cap reached"}
+	}
+
+	l.historySyncs = append(l.historySyncs, now)
+	if l.lastChatSync == nil {
+		l.lastChatSync = make(map[string]time.Time)
+	}
+	for c, t := range l.lastChatSync {
+		if now.Sub(t) >= l.cfg.HistorySyncChatInterval {
+			delete(l.lastChatSync, c)
+		}
+	}
+	l.lastChatSync[chat] = now
+	return Decision{Allowed: true}
+}
+
+// AllowLookup atomically checks whether a live lookup (group info, joined
+// groups, blocklist) is permitted and, if so, records it. A denied decision
+// does not consume budget.
+func (l *Limiter) AllowLookup() Decision {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.clock()
+
+	l.lookups = pruneBefore(l.lookups, now.Add(-time.Hour))
+	if l.cfg.MaxLookupsPerMinute > 0 {
+		minuteAgo := now.Add(-time.Minute)
+		var recent []time.Time
+		for i, t := range l.lookups {
+			if !t.Before(minuteAgo) {
+				recent = l.lookups[i:]
+				break
+			}
+		}
+		if len(recent) >= l.cfg.MaxLookupsPerMinute {
+			return Decision{Allowed: false, RetryAfter: untilOldestExpires(recent, now, time.Minute), Reason: "per-minute lookup cap reached"}
+		}
+	}
+	if l.cfg.MaxLookupsPerHour > 0 && len(l.lookups) >= l.cfg.MaxLookupsPerHour {
+		return Decision{Allowed: false, RetryAfter: untilOldestExpires(l.lookups, now, time.Hour), Reason: "hourly lookup cap reached"}
+	}
+	l.lookups = append(l.lookups, now)
+	return Decision{Allowed: true}
+}
+
+// AllowDownload atomically checks whether a media download from WhatsApp's
+// CDN is permitted and, if so, records it. A denied decision does not consume
+// budget.
+func (l *Limiter) AllowDownload() Decision {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.clock()
+
+	l.downloads = pruneBefore(l.downloads, now.Add(-time.Hour))
+	if l.cfg.MaxDownloadsPerHour > 0 && len(l.downloads) >= l.cfg.MaxDownloadsPerHour {
+		return Decision{Allowed: false, RetryAfter: untilOldestExpires(l.downloads, now, time.Hour), Reason: "hourly media download cap reached"}
+	}
+	l.downloads = append(l.downloads, now)
 	return Decision{Allowed: true}
 }
 

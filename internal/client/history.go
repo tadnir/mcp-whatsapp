@@ -9,6 +9,8 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
+
+	"github.com/sealjay/mcp-whatsapp/internal/ratelimit"
 )
 
 // History-sync anchor modes accepted by RequestHistorySync.
@@ -90,6 +92,10 @@ func (c *Client) RequestHistorySync(ctx context.Context, chatJID string, fromTim
 		},
 		ID:        msgID,
 		Timestamp: timestamp,
+	}
+
+	if err := c.allow(ctx, func(l *ratelimit.Limiter) ratelimit.Decision { return l.AllowHistorySync(jid.ToNonAD().String()) }); err != nil {
+		return "", err
 	}
 
 	historyMsg := c.wa.BuildHistorySyncRequest(messageInfo, count)

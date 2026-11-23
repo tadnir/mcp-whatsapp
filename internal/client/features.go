@@ -236,11 +236,8 @@ func (c *Client) IsOnWhatsApp(ctx context.Context, phones []string) (map[string]
 	// harder than sends, and a parallel fanout that verifies each recipient
 	// trips it first. One IsOnWhatsApp call is one usync regardless of batch
 	// size. The operator override bypasses it, same as sends.
-	if c.limiter != nil && !ratelimit.BypassFromContext(ctx) {
-		if d := c.limiter.AllowUsync(); !d.Allowed {
-			return nil, fmt.Errorf("rate limited: %s — retry in %s (set the X-Rate-Limit-Override header to bypass)",
-				d.Reason, d.RetryAfter.Round(time.Second))
-		}
+	if err := c.allow(ctx, (*ratelimit.Limiter).AllowUsync); err != nil {
+		return nil, err
 	}
 
 	// WhatsApp expects a leading '+' on phone queries.
