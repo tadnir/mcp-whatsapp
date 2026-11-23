@@ -5,7 +5,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/Sealjay/mcp-whatsapp)](https://goreportcard.com/report/github.com/Sealjay/mcp-whatsapp)
 [![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![MCP](https://img.shields.io/badge/MCP-protocol-6366f1)](https://modelcontextprotocol.io/)
-[![42 tools](https://img.shields.io/badge/tools-42-blue)]()
+[![43 tools](https://img.shields.io/badge/tools-43-blue)]()
 [![whatsmeow](https://img.shields.io/badge/whatsmeow-multidevice-25D366?logo=whatsapp&logoColor=white)](https://github.com/tulir/whatsmeow)
 [![Sealjay/mcp-whatsapp MCP server](https://glama.ai/mcp/servers/Sealjay/mcp-whatsapp/badges/score.svg?)](https://glama.ai/mcp/servers/Sealjay/mcp-whatsapp)
 [![GitHub issues](https://img.shields.io/github/issues/Sealjay/mcp-whatsapp)](https://github.com/Sealjay/mcp-whatsapp/issues)
@@ -20,7 +20,7 @@ This started as a fork of [lharries/whatsapp-mcp](https://github.com/lharries/wh
 - **Sent-message storage** — outgoing messages are persisted locally so conversation history stays complete.
 - **Disappearing-message timers** — outgoing messages inherit the group chat's ephemeral timer automatically.
 - **Targeted history sync** — on-demand per-chat backfill via the `request_sync` tool.
-- **Extended tool surface** — 42 tools (see below): reactions, replies, edits, revoke, mark-read, typing, is-on-whatsapp, full group admin, blocklist, polls (create + vote + tally), contact cards, view-once flag, presence, privacy settings, and the profile "About" text.
+- **Extended tool surface** — 43 tools (see below): reactions, replies, edits, revoke, mark-read, typing, is-on-whatsapp, full group admin, blocklist, polls (create + vote + tally), contact cards, view-once flag, presence, privacy settings, and the profile "About" text.
 - **Single-instance enforcement** — a `flock(2)` on `store/.lock` prevents two `serve` processes racing on the same SQLite files.
 
 ## Setup
@@ -130,7 +130,7 @@ Data lives under `./store/` (`-store DIR`): `messages.db` (message cache), `what
 
 ## Tools
 
-42 tools, grouped by purpose.
+43 tools, grouped by purpose.
 
 ### Read / query
 
@@ -139,6 +139,7 @@ Data lives under `./store/` (`-store DIR`): `messages.db` (message cache), `what
 | `search_contacts` | Substring search across cached contact names and phone numbers |
 | `list_messages` | Query + filter messages; returns formatted text with context windows |
 | `list_chats` | List chats with last-message preview; sort by activity or name |
+| `list_chat_activity` | Messages sent and received per day in each direct chat, without content (for keep-in-touch apps) |
 | `get_chat` | Chat metadata by JID |
 | `get_message_context` | Before/after window around a specific message |
 | `download_media` | Download persisted media to a local path |
