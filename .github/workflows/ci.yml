@@ -44,7 +44,8 @@ jobs:
         run: bash ./scripts/mdtest-parity.sh
 
   upgrade-check:
-    if: github.event_name == 'schedule'
+    # Upstream only: on a fork it would open issues in the fork.
+    if: github.event_name == 'schedule' && github.repository == 'Sealjay/mcp-whatsapp'
     runs-on: ubuntu-latest
     permissions:
       issues: write

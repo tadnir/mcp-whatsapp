@@ -61,7 +61,7 @@ func TestRateLimit_AllowBurstThenDeny(t *testing.T) {
 // indefinitely, not just for the first few cycles.
 func TestRateLimit_PairPageSurvivesFiveSecondAutoRefresh(t *testing.T) {
 	clk := &fakeClock{now: time.Now()}
-	l := newLimiterWithClock(15.0/60.0, 5, clk) // matches pairGetLimiter
+	l := newLimiterWithClock(15.0/60.0, 5, clk) // slowest rate the 5s refresh survives; pairGetLimiter is now 60/min, burst 20
 
 	for i := 0; i < 5; i++ {
 		if !l.Allow() {
