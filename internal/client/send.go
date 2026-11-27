@@ -119,7 +119,7 @@ func (c *Client) ephemeralContextInfo(ctx context.Context, chat types.JID) *waPr
 	if chat.Server != "g.us" {
 		return nil
 	}
-	gi, err := c.wa.GetGroupInfo(ctx, chat)
+	gi, err := c.groupInfo(ctx, chat, false)
 	if err != nil || gi.DisappearingTimer == 0 {
 		return nil
 	}

@@ -239,3 +239,75 @@ func TestConcurrentSends(t *testing.T) {
 		t.Fatalf("expected exactly 1 send admitted at a frozen clock, got %d", allowed)
 	}
 }
+
+func TestAllowHistorySync_PerChatIntervalAndHourlyCap(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxHistorySyncsPerHour = 3
+	cfg.HistorySyncChatInterval = 2 * time.Minute
+	l, advance := newTestLimiter(t, cfg)
+
+	if d := l.AllowHistorySync("a"); !d.Allowed {
+		t.Fatalf("first sync should be allowed, got %+v", d)
+	}
+	if d := l.AllowHistorySync("a"); d.Allowed || d.RetryAfter != 2*time.Minute {
+		t.Fatalf("second sync for the same chat should wait 2m, got %+v", d)
+	}
+	if d := l.AllowHistorySync("b"); !d.Allowed {
+		t.Fatalf("another chat should be allowed, got %+v", d)
+	}
+	advance(2 * time.Minute)
+	if d := l.AllowHistorySync("a"); !d.Allowed {
+		t.Fatalf("same chat after the interval should be allowed, got %+v", d)
+	}
+	if d := l.AllowHistorySync("c"); d.Allowed {
+		t.Fatalf("fourth sync in the hour should hit the cap, got %+v", d)
+	}
+	advance(time.Hour + time.Second)
+	if d := l.AllowHistorySync("c"); !d.Allowed {
+		t.Fatalf("cap should free up after an hour, got %+v", d)
+	}
+}
+
+func TestAllowLookup_MinuteAndHourCaps(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxLookupsPerMinute = 2
+	cfg.MaxLookupsPerHour = 3
+	l, advance := newTestLimiter(t, cfg)
+
+	for i := 0; i < 2; i++ {
+		if d := l.AllowLookup(); !d.Allowed {
+			t.Fatalf("lookup %d should be allowed, got %+v", i, d)
+		}
+	}
+	if d := l.AllowLookup(); d.Allowed || d.RetryAfter != time.Minute {
+		t.Fatalf("third lookup in a minute should wait 1m, got %+v", d)
+	}
+	advance(time.Minute + time.Second)
+	if d := l.AllowLookup(); !d.Allowed {
+		t.Fatalf("lookup after a minute should be allowed, got %+v", d)
+	}
+	advance(time.Minute + time.Second)
+	if d := l.AllowLookup(); d.Allowed {
+		t.Fatalf("fourth lookup in the hour should hit the cap, got %+v", d)
+	}
+	advance(time.Hour + time.Second)
+	if d := l.AllowLookup(); !d.Allowed {
+		t.Fatalf("cap should free up after an hour, got %+v", d)
+	}
+}
+
+func TestAllowDownload_HourlyCap(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxDownloadsPerHour = 2
+	l, advance := newTestLimiter(t, cfg)
+
+	l.AllowDownload()
+	l.AllowDownload()
+	if d := l.AllowDownload(); d.Allowed {
+		t.Fatalf("third download should hit the cap, got %+v", d)
+	}
+	advance(time.Hour + time.Second)
+	if d := l.AllowDownload(); !d.Allowed {
+		t.Fatalf("cap should free up after an hour, got %+v", d)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/sealjay/mcp-whatsapp/internal/ratelimit"
 	"github.com/sealjay/mcp-whatsapp/internal/security"
 	"go.mau.fi/whatsmeow"
 )
@@ -157,6 +158,10 @@ func (c *Client) Download(ctx context.Context, messageID, chatJID, outputPath st
 		FileSHA256:    fileSHA256,
 		FileEncSHA256: fileEncSHA256,
 		MediaType:     waMediaType,
+	}
+
+	if err := c.allow(ctx, (*ratelimit.Limiter).AllowDownload); err != nil {
+		return DownloadResult{Success: false, Message: err.Error()}
 	}
 
 	var data []byte

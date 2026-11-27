@@ -39,6 +39,10 @@ func (c *Client) StartEventHandler() {
 			c.log.Infof("Offline sync completed - %d messages synced", v.Count)
 		case *events.Receipt:
 			c.log.Debugf("Receipt for %d messages: %s", len(v.MessageIDs), v.Type)
+		case *events.GroupInfo:
+			c.forgetGroup(v.JID)
+		case *events.JoinedGroup:
+			c.forgetGroup(v.JID)
 		case *events.UndecryptableMessage:
 			c.log.Warnf("Undecryptable message from %s", v.Info.Sender)
 		default:
@@ -382,7 +386,7 @@ func (c *Client) GetChatName(jid types.JID, chatJID string, conversation *waHist
 // conversation metadata to check first).
 func (c *Client) resolveChatNameFallback(ctx context.Context, jid types.JID, sender string) string {
 	if jid.Server == "g.us" {
-		if gi, err := c.wa.GetGroupInfo(ctx, jid); err == nil && gi.Name != "" {
+		if gi, err := c.groupInfo(ctx, jid, false); err == nil && gi.Name != "" {
 			return gi.Name
 		}
 		return "Group " + jid.User

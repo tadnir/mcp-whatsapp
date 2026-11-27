@@ -8,6 +8,8 @@ import (
 
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+
+	"github.com/sealjay/mcp-whatsapp/internal/ratelimit"
 )
 
 type blockedContact struct {
@@ -41,6 +43,9 @@ func blocklistJSON(list *types.Blocklist, toPhone func(string) string) any {
 func (c *Client) GetBlocklist(ctx context.Context) (string, error) {
 	if !c.wa.IsConnected() {
 		return "", errors.New("not connected to WhatsApp")
+	}
+	if err := c.allow(ctx, (*ratelimit.Limiter).AllowLookup); err != nil {
+		return "", err
 	}
 	list, err := c.wa.GetBlocklist(ctx, "")
 	if err != nil {

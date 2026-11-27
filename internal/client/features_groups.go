@@ -13,6 +13,8 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+
+	"github.com/sealjay/mcp-whatsapp/internal/ratelimit"
 )
 
 // parseParticipantJIDs batch-parses a slice of phone/JID strings.
@@ -64,6 +66,7 @@ func (c *Client) LeaveGroup(ctx context.Context, chatJID string) error {
 	if err != nil {
 		return fmt.Errorf("invalid chat JID: %w", err)
 	}
+	defer c.forgetGroup(jid)
 	if err := c.wa.LeaveGroup(ctx, jid); err != nil {
 		return fmt.Errorf("leave group: %w", err)
 	}
@@ -75,9 +78,15 @@ func (c *Client) ListJoinedGroups(ctx context.Context) (string, error) {
 	if !c.wa.IsConnected() {
 		return "", errors.New("not connected to WhatsApp")
 	}
+	if err := c.allow(ctx, (*ratelimit.Limiter).AllowLookup); err != nil {
+		return "", err
+	}
 	groups, err := c.wa.GetJoinedGroups(ctx)
 	if err != nil {
 		return "", fmt.Errorf("list joined groups: %w", err)
+	}
+	for _, g := range groups {
+		c.groups.put(g)
 	}
 	b, err := json.Marshal(groups)
 	if err != nil {
@@ -95,7 +104,7 @@ func (c *Client) GetGroupInfoJSON(ctx context.Context, chatJID string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("invalid chat JID: %w", err)
 	}
-	info, err := c.wa.GetGroupInfo(ctx, jid)
+	info, err := c.groupInfo(ctx, jid, true)
 	if err != nil {
 		return "", fmt.Errorf("get group info: %w", err)
 	}
@@ -240,6 +249,7 @@ func (c *Client) UpdateGroupParticipants(ctx context.Context, chatJID string, pa
 		for j, p := range batch {
 			toSend[j] = p.jid
 		}
+		c.forgetGroup(chat)
 		changed, err := c.wa.UpdateGroupParticipants(ctx, chat, toSend, parsedAction)
 		if err != nil {
 			// Nothing has changed yet only if this was the first request.
@@ -499,6 +509,7 @@ func (c *Client) SetGroupName(ctx context.Context, chatJID, name string) error {
 	if err != nil {
 		return fmt.Errorf("invalid chat JID: %w", err)
 	}
+	defer c.forgetGroup(jid)
 	if err := c.wa.SetGroupName(ctx, jid, name); err != nil {
 		return fmt.Errorf("set group name: %w", err)
 	}
@@ -515,6 +526,7 @@ func (c *Client) SetGroupTopic(ctx context.Context, chatJID, topic string) error
 	if err != nil {
 		return fmt.Errorf("invalid chat JID: %w", err)
 	}
+	defer c.forgetGroup(jid)
 	if err := c.wa.SetGroupTopic(ctx, jid, "", "", topic); err != nil {
 		return fmt.Errorf("set group topic: %w", err)
 	}
@@ -530,6 +542,7 @@ func (c *Client) SetGroupAnnounce(ctx context.Context, chatJID string, announceO
 	if err != nil {
 		return fmt.Errorf("invalid chat JID: %w", err)
 	}
+	defer c.forgetGroup(jid)
 	if err := c.wa.SetGroupAnnounce(ctx, jid, announceOnly); err != nil {
 		return fmt.Errorf("set group announce: %w", err)
 	}
@@ -545,6 +558,7 @@ func (c *Client) SetGroupLocked(ctx context.Context, chatJID string, locked bool
 	if err != nil {
 		return fmt.Errorf("invalid chat JID: %w", err)
 	}
+	defer c.forgetGroup(jid)
 	if err := c.wa.SetGroupLocked(ctx, jid, locked); err != nil {
 		return fmt.Errorf("set group locked: %w", err)
 	}
